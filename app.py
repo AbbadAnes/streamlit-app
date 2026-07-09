@@ -9,19 +9,28 @@ st.set_page_config(page_title="Vote par élimination", page_icon="🗳️", layo
 
 # ---------- Stockage partagé (fichier JSON, partagé entre tous les visiteurs) ----------
 
+DEFAULT_DATA = {
+    "phase": "soumission",
+    "round": 1,
+    "options": [],
+    "eliminated_history": [],   # liste de listes, une par round
+    "voters": {}
+}
+
 def load_data():
     if not os.path.exists(DATA_FILE):
-        default = {
-            "phase": "soumission",
-            "round": 1,
-            "options": [],
-            "eliminated_history": [],   # liste de listes, une par round
-            "voters": {}
-        }
+        default = json.loads(json.dumps(DEFAULT_DATA))
         save_data(default)
         return default
     with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    # Un data.json créé par une ancienne version peut ne pas avoir toutes les clés
+    missing = [k for k in DEFAULT_DATA if k not in data]
+    if missing:
+        for k in missing:
+            data[k] = json.loads(json.dumps(DEFAULT_DATA[k]))
+        save_data(data)
+    return data
 
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
