@@ -5,6 +5,7 @@ import json
 import os
 import re
 import socket
+import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -59,22 +60,63 @@ def domain_base(texte):
     s = unicodedata.normalize("NFKD", texte).encode("ascii", "ignore").decode()
     return re.sub(r"[^a-z0-9-]", "", s.lower().replace(" ", ""))
 
-def check_domaine(domaine):
-    """True = libre, False = pris, None = indéterminé."""
+# RDAP des registres officiels, interrogés en direct (rdap.org, mutualisé, rate-limite vite)
+RDAP_ENDPOINTS = {
+    ".com": "https://rdap.verisign.com/com/v1/domain/{}",
+    ".io": "https://rdap.identitydigital.services/rdap/domain/{}",
+    ".ai": "https://rdap.identitydigital.services/rdap/domain/{}",
+    ".fr": "https://rdap.nic.fr/domain/{}",
+}
+
+def rdap_check(domaine):
+    tld = "." + domaine.rsplit(".", 1)[1]
+    urls = [RDAP_ENDPOINTS[tld].format(domaine)] if tld in RDAP_ENDPOINTS else []
+    urls.append(f"https://rdap.org/domain/{domaine}")
+    for url in urls:
+        for _ in range(2):  # une relance en cas de rate-limit
+            try:
+                r = requests.get(url, timeout=6)
+            except requests.RequestException:
+                break
+            if r.status_code == 404:
+                return True
+            if r.status_code == 200:
+                return False
+            if r.status_code == 429:
+                time.sleep(1)
+                continue
+            break
+    return None
+
+def dns_check(domaine):
+    """DNS-over-HTTPS Cloudflare : NXDOMAIN = très probablement libre, réponse NS = pris."""
     try:
-        r = requests.get(f"https://rdap.org/domain/{domaine}", timeout=6)
-        if r.status_code == 404:
+        r = requests.get(
+            "https://cloudflare-dns.com/dns-query",
+            params={"name": domaine, "type": "NS"},
+            headers={"accept": "application/dns-json"},
+            timeout=6,
+        )
+        reponse = r.json()
+        if reponse.get("Status") == 3:      # NXDOMAIN
             return True
-        if r.status_code == 200:
+        if reponse.get("Status") == 0 and reponse.get("Answer"):
             return False
-    except requests.RequestException:
+    except (requests.RequestException, ValueError):
         pass
-    # Repli DNS : s'il résout, il est forcément pris ; sinon on ne peut pas conclure
+    # Dernier recours : résolution locale — s'il résout, il est forcément pris
     try:
         socket.getaddrinfo(domaine, None)
         return False
     except socket.gaierror:
         return None
+
+def check_domaine(domaine):
+    """True = libre, False = pris, None = indéterminé."""
+    resultat = rdap_check(domaine)
+    if resultat is None:
+        resultat = dns_check(domaine)
+    return resultat
 
 @st.cache_resource
 def _domain_cache():
@@ -94,7 +136,8 @@ def verifier_domaines(options):
         with st.spinner(f"🌐 Vérification de {len(manquants)} domaine(s)..."):
             with ThreadPoolExecutor(max_workers=8) as ex:
                 for d, res in zip(manquants, ex.map(check_domaine, manquants)):
-                    cache[d] = res
+                    if res is not None:  # ne pas figer les échecs : on retentera au prochain chargement
+                        cache[d] = res
     return cache
 
 def ligne_domaines(texte, cache):
