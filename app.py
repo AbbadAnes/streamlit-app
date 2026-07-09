@@ -3,7 +3,13 @@ import csv
 import io
 import json
 import os
+import re
+import socket
+import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+
+import requests
 
 DATA_FILE = "data.json"
 
@@ -44,6 +50,69 @@ def save_data(data):
 
 data = load_data()
 
+# ---------- Disponibilité des noms de domaine ----------
+
+TLDS = [".io", ".ai", ".com", ".fr"]
+
+def domain_base(texte):
+    """Transforme une idée en nom de domaine : accents et espaces retirés, minuscules."""
+    s = unicodedata.normalize("NFKD", texte).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9-]", "", s.lower().replace(" ", ""))
+
+def check_domaine(domaine):
+    """True = libre, False = pris, None = indéterminé."""
+    try:
+        r = requests.get(f"https://rdap.org/domain/{domaine}", timeout=6)
+        if r.status_code == 404:
+            return True
+        if r.status_code == 200:
+            return False
+    except requests.RequestException:
+        pass
+    # Repli DNS : s'il résout, il est forcément pris ; sinon on ne peut pas conclure
+    try:
+        socket.getaddrinfo(domaine, None)
+        return False
+    except socket.gaierror:
+        return None
+
+@st.cache_resource
+def _domain_cache():
+    # Partagé entre tous les visiteurs et tous les reruns
+    return {}
+
+def verifier_domaines(options):
+    """Vérifie base+TLD pour chaque option, en parallèle, avec cache global."""
+    domaines = []
+    for o in options:
+        base = domain_base(o["texte"])
+        if base:
+            domaines.extend(base + tld for tld in TLDS)
+    cache = _domain_cache()
+    manquants = [d for d in domaines if d not in cache]
+    if manquants:
+        with st.spinner(f"🌐 Vérification de {len(manquants)} domaine(s)..."):
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                for d, res in zip(manquants, ex.map(check_domaine, manquants)):
+                    cache[d] = res
+    return cache
+
+def ligne_domaines(texte, cache):
+    base = domain_base(texte)
+    if not base:
+        return None
+    parts = []
+    for tld in TLDS:
+        d = base + tld
+        dispo = cache.get(d)
+        if dispo is True:
+            parts.append(f":green[**{d}** ✔]")
+        elif dispo is False:
+            parts.append(f"❌ [{d}](http://{d})")
+        else:
+            parts.append(f":gray[{d} ?]")
+    return " · ".join(parts)
+
 # ---------- Pseudo ----------
 if "pseudo" not in st.session_state:
     st.session_state.pseudo = ""
@@ -51,7 +120,7 @@ if "pseudo" not in st.session_state:
 # ---------- En-tête ----------
 st.title("🗳️ Vote par élimination")
 
-steps = ["📝 1. On propose des idées", "🗳️ 2. On vote (élimination des 5 dernières)"]
+steps = ["📝 1. On propose des idées", "🗳️ 2. On vote (élimination à chaque tour)"]
 current_step = 0 if data["phase"] == "soumission" else 1
 st.progress((current_step + 1) / 2, text=steps[current_step])
 
@@ -60,7 +129,7 @@ with st.expander("ℹ️ Comment ça marche ?"):
     1. **Tout le monde propose des idées** (autant qu'on veut).
     2. Quand toutes les idées sont là, on **lance le vote**.
     3. Chacun **vote pour ses options préférées**.
-    4. Un animateur **clôture le tour** : les 5 options avec le moins de votes sont éliminées.
+    4. Un animateur **clôture le tour** en choisissant **combien d'options éliminer** : celles avec le moins de votes sont éliminées.
     5. On revote sur les options restantes, jusqu'à ce qu'il n'en reste qu'une : le gagnant 🏆
     """)
 
@@ -107,10 +176,14 @@ if data["phase"] == "soumission":
     if not data["options"]:
         st.caption("Aucune idée pour l'instant. Sois le premier à en proposer une !")
     else:
+        domaines = verifier_domaines(data["options"])
         for o in data["options"]:
             c1, c2 = st.columns([5, 1])
             with c1:
                 st.markdown(f"**{o['texte']}**  \n:gray[proposé par {o.get('auteur', '?')}]")
+                ligne = ligne_domaines(o["texte"], domaines)
+                if ligne:
+                    st.caption(ligne)
             with c2:
                 if o.get("auteur") == pseudo:
                     if st.button("🗑️", key=f"del_{o['id']}", help="Supprimer ta proposition"):
@@ -143,9 +216,14 @@ else:
     vote_key = f"{data['round']}-{pseudo}"
     deja_vote_id = data["voters"].get(vote_key)
 
+    domaines = verifier_domaines(data["options"])
+
     if len(data["options"]) == 1:
         st.balloons()
         st.success(f"## 🏆 Gagnant : **{data['options'][0]['texte']}**")
+        ligne = ligne_domaines(data["options"][0]["texte"], domaines)
+        if ligne:
+            st.markdown(ligne)
     else:
         options_triees = sorted(data["options"], key=lambda o: -o["votes"])
         total_votes = sum(o["votes"] for o in options_triees) or 1
@@ -162,6 +240,9 @@ else:
                     if deja_vote_id == o["id"]:
                         label += "  ✅"
                     st.markdown(label)
+                    ligne = ligne_domaines(o["texte"], domaines)
+                    if ligne:
+                        st.caption(ligne)
                     st.progress(o["votes"] / max_votes if max_votes else 0, text=f"{o['votes']} vote(s)")
                 with c2:
                     disabled = bool(deja_vote_id)
@@ -178,7 +259,13 @@ else:
         if n_options <= 1:
             st.caption("Il ne reste qu'une option, il n'y a plus rien à clôturer.")
         else:
-            n_a_eliminer = min(5, n_options - 1)
+            n_a_eliminer = st.number_input(
+                "Nombre d'options à éliminer ce tour",
+                min_value=1,
+                max_value=n_options - 1,
+                value=1,
+                help="Les options avec le moins de votes seront éliminées. Il restera toujours au moins une option."
+            )
             if st.button(f"⏭️ Clôturer le round {data['round']} (élimine {n_a_eliminer} option(s))", type="primary"):
                 options_triees = sorted(data["options"], key=lambda o: o["votes"])
                 elimines = options_triees[:n_a_eliminer]
