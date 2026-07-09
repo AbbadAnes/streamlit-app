@@ -26,9 +26,13 @@ def load_data():
         data = json.load(f)
     # Un data.json créé par une ancienne version peut ne pas avoir toutes les clés
     missing = [k for k in DEFAULT_DATA if k not in data]
+    for k in missing:
+        data[k] = json.loads(json.dumps(DEFAULT_DATA[k]))
+    # État incohérent (ex. vieux fichier) : en phase vote sans options, on repart en soumission
+    if data["phase"] != "soumission" and not data["options"]:
+        data["phase"] = "soumission"
+        missing.append("phase")
     if missing:
-        for k in missing:
-            data[k] = json.loads(json.dumps(DEFAULT_DATA[k]))
         save_data(data)
     return data
 
