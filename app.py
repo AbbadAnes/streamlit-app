@@ -1,4 +1,6 @@
 import streamlit as st
+import csv
+import io
 import json
 import os
 from datetime import datetime
@@ -195,3 +197,71 @@ else:
             if os.path.exists(DATA_FILE):
                 os.remove(DATA_FILE)
             st.rerun()
+
+# ================= EXPORT / IMPORT CSV =================
+
+def options_to_csv(options):
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["texte", "auteur", "votes"])
+    for o in options:
+        writer.writerow([o["texte"], o.get("auteur", ""), o["votes"]])
+    # BOM UTF-8 pour qu'Excel ouvre le fichier avec les accents corrects
+    return buf.getvalue().encode("utf-8-sig")
+
+def options_from_csv(raw_bytes):
+    texte = raw_bytes.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(texte))
+    if reader.fieldnames is None or "texte" not in reader.fieldnames:
+        raise ValueError("Le CSV doit avoir au moins une colonne « texte » (et optionnellement « auteur », « votes »).")
+    options = []
+    for i, row in enumerate(reader):
+        if not (row.get("texte") or "").strip():
+            continue
+        try:
+            votes = int(row.get("votes") or 0)
+        except ValueError:
+            votes = 0
+        options.append({
+            "id": f"import-{i}-{datetime.now().timestamp()}",
+            "texte": row["texte"].strip(),
+            "auteur": (row.get("auteur") or "").strip() or "import",
+            "votes": votes
+        })
+    if not options:
+        raise ValueError("Aucune option trouvée dans le CSV.")
+    return options
+
+st.divider()
+with st.expander("💾 Exporter / importer les votes (CSV)"):
+    st.download_button(
+        f"⬇️ Exporter les {len(data['options'])} option(s) et leurs votes",
+        data=options_to_csv(data["options"]),
+        file_name=f"votes-round-{data['round']}.csv",
+        mime="text/csv",
+        use_container_width=True,
+        disabled=not data["options"]
+    )
+
+    st.divider()
+    fichier = st.file_uploader(
+        "Importer un CSV (colonnes : texte, auteur, votes)",
+        type=["csv"],
+        help="Remplace les options actuelles par celles du fichier. "
+             "S'il contient des votes, la session reprend en phase de vote ; sinon en phase de soumission."
+    )
+    if fichier is not None:
+        st.warning("⚠️ L'import remplace toutes les options et votes actuels.")
+        if st.button("📥 Importer et remplacer", type="primary", use_container_width=True):
+            try:
+                options = options_from_csv(fichier.getvalue())
+            except (ValueError, UnicodeDecodeError) as e:
+                st.error(f"Import impossible : {e}")
+            else:
+                data["options"] = options
+                data["phase"] = "vote" if any(o["votes"] for o in options) else "soumission"
+                data["round"] = 1
+                data["eliminated_history"] = []
+                data["voters"] = {}
+                save_data(data)
+                st.rerun()
