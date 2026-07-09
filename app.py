@@ -73,7 +73,7 @@ def rdap_check(domaine):
     urls = [RDAP_ENDPOINTS[tld].format(domaine)] if tld in RDAP_ENDPOINTS else []
     urls.append(f"https://rdap.org/domain/{domaine}")
     for url in urls:
-        for _ in range(2):  # une relance en cas de rate-limit
+        for _ in range(3):  # relances en cas de rate-limit
             try:
                 r = requests.get(url, timeout=6)
             except requests.RequestException:
@@ -83,27 +83,32 @@ def rdap_check(domaine):
             if r.status_code == 200:
                 return False
             if r.status_code == 429:
-                time.sleep(1)
+                try:
+                    attente = min(float(r.headers.get("Retry-After", 1)), 3)
+                except ValueError:
+                    attente = 1
+                time.sleep(attente)
                 continue
             break
     return None
 
+DOH_RESOLVERS = [
+    ("https://cloudflare-dns.com/dns-query", {"accept": "application/dns-json"}),
+    ("https://dns.google/resolve", {}),
+]
+
 def dns_check(domaine):
-    """DNS-over-HTTPS Cloudflare : NXDOMAIN = très probablement libre, réponse NS = pris."""
-    try:
-        r = requests.get(
-            "https://cloudflare-dns.com/dns-query",
-            params={"name": domaine, "type": "NS"},
-            headers={"accept": "application/dns-json"},
-            timeout=6,
-        )
-        reponse = r.json()
+    """DNS-over-HTTPS : NXDOMAIN = très probablement libre, réponse NS = pris."""
+    for url, headers in DOH_RESOLVERS:
+        try:
+            r = requests.get(url, params={"name": domaine, "type": "NS"}, headers=headers, timeout=6)
+            reponse = r.json()
+        except (requests.RequestException, ValueError):
+            continue
         if reponse.get("Status") == 3:      # NXDOMAIN
             return True
         if reponse.get("Status") == 0 and reponse.get("Answer"):
             return False
-    except (requests.RequestException, ValueError):
-        pass
     # Dernier recours : résolution locale — s'il résout, il est forcément pris
     try:
         socket.getaddrinfo(domaine, None)
@@ -133,11 +138,18 @@ def verifier_domaines(options):
     cache = _domain_cache()
     manquants = [d for d in domaines if d not in cache]
     if manquants:
+        # Une file par TLD : jamais plus d'une requête simultanée vers un même registre,
+        # sinon il rate-limite (AFNIC notamment) et on récolte des « ? »
+        files = {}
+        for d in manquants:
+            files.setdefault(d.rsplit(".", 1)[1], []).append(d)
         with st.spinner(f"🌐 Vérification de {len(manquants)} domaine(s)..."):
-            with ThreadPoolExecutor(max_workers=8) as ex:
-                for d, res in zip(manquants, ex.map(check_domaine, manquants)):
-                    if res is not None:  # ne pas figer les échecs : on retentera au prochain chargement
-                        cache[d] = res
+            with ThreadPoolExecutor(max_workers=len(files)) as ex:
+                traiter = lambda file: [(d, check_domaine(d)) for d in file]
+                for resultats in ex.map(traiter, files.values()):
+                    for d, res in resultats:
+                        if res is not None:  # ne pas figer les échecs : on retentera au prochain chargement
+                            cache[d] = res
     return cache
 
 def ligne_domaines(texte, cache):
