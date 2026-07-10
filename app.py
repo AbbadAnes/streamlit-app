@@ -362,6 +362,28 @@ else:
                         save_data(data)
                         st.rerun()
 
+    if len(data["options"]) > 1:
+        st.divider()
+        with st.expander("➕ Ajouter une idée en plein round"):
+            st.caption("L'idée rejoint le round en cours avec 0 vote — tout le monde peut voter pour elle immédiatement.")
+            with st.form("ajout_option_round", clear_on_submit=True, border=False):
+                texte = st.text_input("Ton idée", label_visibility="collapsed",
+                                      placeholder="Une idée de dernière minute...")
+                if st.form_submit_button("➕ Ajouter au round en cours", use_container_width=True):
+                    if not texte.strip():
+                        st.warning("Écris quelque chose avant d'ajouter.")
+                    elif any(o["texte"].strip().lower() == texte.strip().lower() for o in data["options"]):
+                        st.warning("Cette idée est déjà dans la course.")
+                    else:
+                        data["options"].append({
+                            "id": f"{datetime.now().timestamp()}",
+                            "texte": texte.strip(),
+                            "auteur": pseudo,
+                            "votes": 0
+                        })
+                        save_data(data)
+                        st.rerun()
+
     st.divider()
     with st.expander("🎛️ Espace animateur (clôturer le tour)"):
         if not est_animateur():
