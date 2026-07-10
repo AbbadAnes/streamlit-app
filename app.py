@@ -136,7 +136,8 @@ def verifier_domaines(options):
         if base:
             domaines.extend(base + tld for tld in TLDS)
     cache = _domain_cache()
-    manquants = [d for d in domaines if d not in cache]
+    # cache.get(d) is None couvre aussi les vieux None figés par une ancienne version
+    manquants = [d for d in domaines if cache.get(d) is None]
     if manquants:
         # Une file par TLD : jamais plus d'une requête simultanée vers un même registre,
         # sinon il rate-limite (AFNIC notamment) et on récolte des « ? »
@@ -333,6 +334,27 @@ else:
                 data["voters"] = {}
                 save_data(data)
                 st.rerun()
+
+        st.divider()
+        st.caption("Vote lancé trop tôt ? Reviens à la phase d'idées : toutes les idées sont conservées "
+                   "(y compris celles déjà éliminées), seuls les votes repartent à zéro.")
+        if st.button("↩️ Annuler les rounds et revenir aux idées", use_container_width=True):
+            for i, elims in enumerate(data["eliminated_history"]):
+                for j, texte in enumerate(elims):
+                    data["options"].append({
+                        "id": f"restaure-{i}-{j}-{datetime.now().timestamp()}",
+                        "texte": texte,
+                        "auteur": "?",  # l'historique d'élimination ne conservait que le texte
+                        "votes": 0
+                    })
+            for o in data["options"]:
+                o["votes"] = 0
+            data["phase"] = "soumission"
+            data["round"] = 1
+            data["eliminated_history"] = []
+            data["voters"] = {}
+            save_data(data)
+            st.rerun()
 
         st.divider()
         if st.button("🔄 Tout réinitialiser (nouvelle session complète)"):
