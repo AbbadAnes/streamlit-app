@@ -194,8 +194,23 @@ def ligne_domaines(texte, cache):
     return " · ".join(parts)
 
 # ---------- Pseudo ----------
-if "pseudo" not in st.session_state:
-    st.session_state.pseudo = ""
+
+PSEUDOS_FIXES = ["Adil", "Gérald", "Raphael"]
+PSEUDO_AUTRE = "➕ Autre / je ne suis pas dans la liste…"
+
+def pseudos_connus(data):
+    """Pseudos fixes + tous les utilisateurs actifs (auteurs d'idées et votants)."""
+    noms = set(PSEUDOS_FIXES)
+    for o in data["options"]:
+        auteur = (o.get("auteur") or "").strip()
+        if auteur and auteur not in ("?", "import"):
+            noms.add(auteur)
+    for cle in data["voters"]:
+        # clé au format "<round>-<pseudo>" ; le pseudo peut lui-même contenir des tirets
+        nom = cle.split("-", 1)[1].strip() if "-" in cle else ""
+        if nom:
+            noms.add(nom)
+    return sorted(noms, key=str.lower)
 
 # ---------- En-tête ----------
 st.title("🗳️ Vote par élimination")
@@ -208,7 +223,8 @@ with st.expander("ℹ️ Comment ça marche ?"):
     st.markdown("""
     1. **Tout le monde propose des idées** (autant qu'on veut).
     2. Quand toutes les idées sont là, on **lance le vote**.
-    3. Chacun **vote pour ses options préférées**.
+    3. Chacun **vote** : tant qu'il reste plus de 5 options, tu peux voter pour **plusieurs options**
+       (une seule fois chacune) ; à partir du **top 5**, un seul vote par personne.
     4. Un animateur **clôture le tour** en choisissant **combien d'options éliminer** : celles avec le moins de votes sont éliminées.
     5. On revote sur les options restantes, jusqu'à ce qu'il n'en reste qu'une : le gagnant 🏆
     """)
@@ -216,13 +232,18 @@ with st.expander("ℹ️ Comment ça marche ?"):
 st.divider()
 
 # ---------- Pseudo, requis dès le début ----------
-pseudo = st.text_input(
+choix_pseudo = st.selectbox(
     "👤 Ton prénom ou pseudo",
-    value=st.session_state.pseudo,
-    placeholder="Ex : Anes",
+    pseudos_connus(data) + [PSEUDO_AUTRE],
+    index=None,
+    placeholder="Choisis ton prénom…",
+    key="pseudo_choix",
     help="Sert juste à éviter que tu votes plusieurs fois. Pas besoin de compte."
 )
-st.session_state.pseudo = pseudo
+if choix_pseudo == PSEUDO_AUTRE:
+    pseudo = st.text_input("Ton prénom", placeholder="Ex : Anes", key="pseudo_libre")
+else:
+    pseudo = choix_pseudo or ""
 pseudo = pseudo.strip()
 
 if not pseudo:
@@ -294,7 +315,10 @@ else:
                 st.caption(f"Round {i} : " + ", ".join(elims))
 
     vote_key = f"{data['round']}-{pseudo}"
-    deja_vote_id = data["voters"].get(vote_key)
+    votes_utilisateur = data["voters"].get(vote_key) or []
+    if isinstance(votes_utilisateur, str):  # ancien format : un seul id stocké en chaîne
+        votes_utilisateur = [votes_utilisateur]
+    mode_top5 = len(data["options"]) <= 5
 
     domaines = verifier_domaines(data["options"])
 
@@ -309,15 +333,20 @@ else:
         total_votes = sum(o["votes"] for o in options_triees) or 1
         max_votes = max((o["votes"] for o in options_triees), default=0) or 1
 
-        if deja_vote_id:
-            st.success("✅ Ton vote est enregistré pour ce tour. Reviens au prochain round !")
+        if mode_top5:
+            st.info("🏁 Top 5 atteint : **un seul vote** par personne ce round.")
+            if votes_utilisateur:
+                st.success("✅ Ton vote est enregistré pour ce tour. Reviens au prochain round !")
+        else:
+            st.info(f"{len(data['options'])} options en lice : vote pour **autant d'options que tu veux** "
+                    "(une seule fois chacune). À partir du top 5, ce sera un seul vote par personne.")
 
         for o in options_triees:
             with st.container(border=True):
                 c1, c2 = st.columns([4, 1])
                 with c1:
                     label = f"**{o['texte']}**"
-                    if deja_vote_id == o["id"]:
+                    if o["id"] in votes_utilisateur:
                         label += "  ✅"
                     st.markdown(label)
                     ligne = ligne_domaines(o["texte"], domaines)
@@ -325,10 +354,11 @@ else:
                         st.caption(ligne)
                     st.progress(o["votes"] / max_votes if max_votes else 0, text=f"{o['votes']} vote(s)")
                 with c2:
-                    disabled = bool(deja_vote_id)
+                    # Déjà voté pour cette option, ou vote unique déjà utilisé en mode top 5
+                    disabled = o["id"] in votes_utilisateur or (mode_top5 and bool(votes_utilisateur))
                     if st.button("👍 Voter", key=f"vote_{o['id']}", disabled=disabled, use_container_width=True):
                         o["votes"] += 1
-                        data["voters"][vote_key] = o["id"]
+                        data["voters"][vote_key] = votes_utilisateur + [o["id"]]
                         save_data(data)
                         st.rerun()
 
