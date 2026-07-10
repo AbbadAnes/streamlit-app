@@ -1,5 +1,6 @@
 import streamlit as st
 import csv
+import hmac
 import io
 import json
 import os
@@ -50,6 +51,29 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 data = load_data()
+
+# ---------- Accès animateur (mot de passe dans les secrets Streamlit) ----------
+
+def _mdp_animateur():
+    try:
+        return str(st.secrets.get("ADMIN_PASSWORD", ""))
+    except Exception:  # pas de fichier secrets en local
+        return ""
+
+MDP_ANIMATEUR = _mdp_animateur()
+
+def est_animateur():
+    # Sans mot de passe configuré (dev local), tout le monde est animateur
+    return not MDP_ANIMATEUR or st.session_state.get("animateur_ok", False)
+
+def connexion_animateur(cle):
+    saisie = st.text_input("🔑 Mot de passe animateur", type="password", key=f"mdp_animateur_{cle}")
+    if saisie:
+        if hmac.compare_digest(saisie, MDP_ANIMATEUR):
+            st.session_state.animateur_ok = True
+            st.rerun()
+        else:
+            st.error("Mot de passe incorrect.")
 
 # ---------- Disponibilité des noms de domaine ----------
 
@@ -310,57 +334,61 @@ else:
 
     st.divider()
     with st.expander("🎛️ Espace animateur (clôturer le tour)"):
-        st.caption("À utiliser quand tout le monde a voté, pour passer au round suivant.")
-        n_options = len(data["options"])
-        if n_options <= 1:
-            st.caption("Il ne reste qu'une option, il n'y a plus rien à clôturer.")
+        if not est_animateur():
+            st.caption("🔒 Espace réservé à l'animateur.")
+            connexion_animateur("vote")
         else:
-            n_a_eliminer = st.number_input(
-                "Nombre d'options à éliminer ce tour",
-                min_value=1,
-                max_value=n_options - 1,
-                value=1,
-                help="Les options avec le moins de votes seront éliminées. Il restera toujours au moins une option."
-            )
-            if st.button(f"⏭️ Clôturer le round {data['round']} (élimine {n_a_eliminer} option(s))", type="primary"):
-                options_triees = sorted(data["options"], key=lambda o: o["votes"])
-                elimines = options_triees[:n_a_eliminer]
-                restants = options_triees[n_a_eliminer:]
-                for o in restants:
+            st.caption("À utiliser quand tout le monde a voté, pour passer au round suivant.")
+            n_options = len(data["options"])
+            if n_options <= 1:
+                st.caption("Il ne reste qu'une option, il n'y a plus rien à clôturer.")
+            else:
+                n_a_eliminer = st.number_input(
+                    "Nombre d'options à éliminer ce tour",
+                    min_value=1,
+                    max_value=n_options - 1,
+                    value=1,
+                    help="Les options avec le moins de votes seront éliminées. Il restera toujours au moins une option."
+                )
+                if st.button(f"⏭️ Clôturer le round {data['round']} (élimine {n_a_eliminer} option(s))", type="primary"):
+                    options_triees = sorted(data["options"], key=lambda o: o["votes"])
+                    elimines = options_triees[:n_a_eliminer]
+                    restants = options_triees[n_a_eliminer:]
+                    for o in restants:
+                        o["votes"] = 0
+                    data["options"] = restants
+                    data["eliminated_history"].append([o["texte"] for o in elimines])
+                    data["round"] += 1
+                    data["voters"] = {}
+                    save_data(data)
+                    st.rerun()
+
+            st.divider()
+            st.caption("Vote lancé trop tôt ? Reviens à la phase d'idées : toutes les idées sont conservées "
+                       "(y compris celles déjà éliminées), seuls les votes repartent à zéro.")
+            if st.button("↩️ Annuler les rounds et revenir aux idées", use_container_width=True):
+                for i, elims in enumerate(data["eliminated_history"]):
+                    for j, texte in enumerate(elims):
+                        data["options"].append({
+                            "id": f"restaure-{i}-{j}-{datetime.now().timestamp()}",
+                            "texte": texte,
+                            "auteur": "?",  # l'historique d'élimination ne conservait que le texte
+                            "votes": 0
+                        })
+                for o in data["options"]:
                     o["votes"] = 0
-                data["options"] = restants
-                data["eliminated_history"].append([o["texte"] for o in elimines])
-                data["round"] += 1
+                data["phase"] = "soumission"
+                data["round"] = 1
+                data["eliminated_history"] = []
                 data["voters"] = {}
                 save_data(data)
                 st.rerun()
 
-        st.divider()
-        st.caption("Vote lancé trop tôt ? Reviens à la phase d'idées : toutes les idées sont conservées "
-                   "(y compris celles déjà éliminées), seuls les votes repartent à zéro.")
-        if st.button("↩️ Annuler les rounds et revenir aux idées", use_container_width=True):
-            for i, elims in enumerate(data["eliminated_history"]):
-                for j, texte in enumerate(elims):
-                    data["options"].append({
-                        "id": f"restaure-{i}-{j}-{datetime.now().timestamp()}",
-                        "texte": texte,
-                        "auteur": "?",  # l'historique d'élimination ne conservait que le texte
-                        "votes": 0
-                    })
-            for o in data["options"]:
-                o["votes"] = 0
-            data["phase"] = "soumission"
-            data["round"] = 1
-            data["eliminated_history"] = []
-            data["voters"] = {}
-            save_data(data)
-            st.rerun()
-
-        st.divider()
-        if st.button("🔄 Tout réinitialiser (nouvelle session complète)"):
-            if os.path.exists(DATA_FILE):
-                os.remove(DATA_FILE)
-            st.rerun()
+            st.divider()
+            if st.button("🔄 Tout réinitialiser (nouvelle session complète)"):
+                if os.path.exists(DATA_FILE):
+                    os.remove(DATA_FILE)
+                st.rerun()
 
 # ================= EXPORT / IMPORT CSV =================
 
@@ -408,24 +436,28 @@ with st.expander("💾 Exporter / importer les votes (CSV)"):
     )
 
     st.divider()
-    fichier = st.file_uploader(
-        "Importer un CSV (colonnes : texte, auteur, votes)",
-        type=["csv"],
-        help="Remplace les options actuelles par celles du fichier. "
-             "S'il contient des votes, la session reprend en phase de vote ; sinon en phase de soumission."
-    )
-    if fichier is not None:
-        st.warning("⚠️ L'import remplace toutes les options et votes actuels.")
-        if st.button("📥 Importer et remplacer", type="primary", use_container_width=True):
-            try:
-                options = options_from_csv(fichier.getvalue())
-            except (ValueError, UnicodeDecodeError) as e:
-                st.error(f"Import impossible : {e}")
-            else:
-                data["options"] = options
-                data["phase"] = "vote" if any(o["votes"] for o in options) else "soumission"
-                data["round"] = 1
-                data["eliminated_history"] = []
-                data["voters"] = {}
-                save_data(data)
-                st.rerun()
+    if not est_animateur():
+        st.caption("🔒 L'import (qui remplace toutes les données) est réservé à l'animateur.")
+        connexion_animateur("import")
+    else:
+        fichier = st.file_uploader(
+            "Importer un CSV (colonnes : texte, auteur, votes)",
+            type=["csv"],
+            help="Remplace les options actuelles par celles du fichier. "
+                 "S'il contient des votes, la session reprend en phase de vote ; sinon en phase de soumission."
+        )
+        if fichier is not None:
+            st.warning("⚠️ L'import remplace toutes les options et votes actuels.")
+            if st.button("📥 Importer et remplacer", type="primary", use_container_width=True):
+                try:
+                    options = options_from_csv(fichier.getvalue())
+                except (ValueError, UnicodeDecodeError) as e:
+                    st.error(f"Import impossible : {e}")
+                else:
+                    data["options"] = options
+                    data["phase"] = "vote" if any(o["votes"] for o in options) else "soumission"
+                    data["round"] = 1
+                    data["eliminated_history"] = []
+                    data["voters"] = {}
+                    save_data(data)
+                    st.rerun()
